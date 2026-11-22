@@ -1,0 +1,53 @@
+rules_version = '2';
+
+// Worth It: a private space per person.
+// Paste into Firebase console → Firestore Database → Rules, with ADMIN_EMAIL replaced by your
+// Gmail address (all lower case, keep the quotes), then Publish. The copy in this repo keeps the
+// placeholder on purpose, because the repo is public.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null
+        && request.auth.token.email != null
+        && request.auth.token.email_verified == true;
+    }
+    function isMe(uid) { return signedIn() && request.auth.uid == uid; }
+    // The owner can start a space without an invite (so the very first person can get in)
+    function isAdmin() { return signedIn() && request.auth.token.email.lower() == 'ADMIN_EMAIL'; }
+    function invitePath(code) { return /databases/$(database)/documents/invites/$(code); }
+    function userPath(uid) { return /databases/$(database)/documents/users/$(uid); }
+
+    // ---- Each person's space: settings, workouts and sessions. Only they can see it. ----
+    match /users/{uid} {
+      // Creating a space: you're the owner, or you use an unused invite, marked as used by you in the same write
+      function validInvite() {
+        let code = request.resource.data.get('joinedWith', '');
+        return code is string && code != ''
+          && exists(invitePath(code))
+          && get(invitePath(code)).data.usedBy == null
+          && getAfter(invitePath(code)).data.usedBy == uid;
+      }
+      allow read, update, delete: if isMe(uid);
+      allow create: if isMe(uid) && (isAdmin() || validInvite());
+    }
+
+    // ---- Invites: single-use codes made by people already using the app ----
+    match /invites/{code} {
+      allow get: if signedIn();
+      allow list: if signedIn() && resource.data.by == request.auth.uid;
+      allow create: if signedIn()
+        && exists(userPath(request.auth.uid))
+        && code.size() >= 8 && code.size() <= 20
+        && request.resource.data.by == request.auth.uid
+        && request.resource.data.usedBy == null;
+      // Using an invite: only once, only to mark it as yours, and only while making your space
+      allow update: if signedIn()
+        && resource.data.usedBy == null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['usedBy', 'usedByName', 'usedAt'])
+        && request.resource.data.usedBy == request.auth.uid
+        && getAfter(userPath(request.auth.uid)).data.joinedWith == code;
+      allow delete: if signedIn() && resource.data.by == request.auth.uid;
+    }
+  }
+}
